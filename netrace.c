@@ -28,17 +28,6 @@
 
 #include "netrace.h"
 
-char*				nt_input_popencmd;
-FILE*				nt_input_tracefile;
-char*				nt_input_buffer;
-nt_header_t*		nt_input_trheader;
-int					nt_dependencies_off;
-int					nt_self_throttling;
-int					nt_primed_self_throttle;
-int					nt_done_reading;
-unsigned long long int nt_latest_active_packet_cycle;
-nt_dep_ref_node_t** nt_dependency_array;
-unsigned long long int nt_num_active_packets;
 const char* nt_packet_types[] = { "InvalidCmd", "ReadReq", "ReadResp",
 				"ReadRespWithInvalidate", "WriteReq", "WriteResp",
 				"Writeback", "InvalidCmd", "InvalidCmd", "InvalidCmd",
@@ -62,32 +51,28 @@ int nt_packet_sizes[] = { /*InvalidCmd*/ -1, /*ReadReq*/ 8, /*ReadResp*/ 72,
 const char* nt_node_types[] = { "L1 Data Cache", "L1 Instruction Cache",
 				"L2 Cache", "Memory Controller", "Invalid Node Type" };
 
-nt_packet_list_t*	nt_cleared_packets_list;
-nt_packet_list_t*	nt_cleared_packets_list_tail;
-int nt_track_cleared_packets_list;
-
-void nt_open_trfile( const char* trfilename ) {
-	nt_close_trfile();
+void nt_open_trfile( nt_context_t* ctx, const char* trfilename ) {
+	nt_close_trfile( ctx );
 	int i;
 	int length = 20;
 	for( i = 0; trfilename[i] != 0; i++, length++ );
-	nt_input_popencmd = (char*) nt_checked_malloc( length * sizeof(char) );
-	sprintf( nt_input_popencmd, "bzip2 -dc %s", trfilename );
-	nt_input_tracefile = popen( nt_input_popencmd, "r" );
-	if( nt_input_tracefile == NULL ) {
+	ctx->input_popencmd = (char*) nt_checked_malloc( length * sizeof(char) );
+	sprintf( ctx->input_popencmd, "bzip2 -dc %s", trfilename );
+	ctx->input_tracefile = popen( ctx->input_popencmd, "r" );
+	if( ctx->input_tracefile == NULL ) {
 		nt_error( "failed to open pipe to trace file" );
 	}
-	nt_input_trheader = nt_read_trheader();
-	if( nt_dependency_array == NULL ) {
-		nt_dependency_array = nt_checked_malloc( sizeof(nt_dep_ref_node_t*) * NT_DEPENDENCY_ARRAY_SIZE );
-		memset( nt_dependency_array, 0, sizeof(nt_dep_ref_node_t*) * NT_DEPENDENCY_ARRAY_SIZE );
-		nt_num_active_packets = 0;
+	ctx->input_trheader = nt_read_trheader( ctx );
+	if( ctx->dependency_array == NULL ) {
+		ctx->dependency_array = nt_checked_malloc( sizeof(nt_dep_ref_node_t*) * NT_DEPENDENCY_ARRAY_SIZE );
+		memset( ctx->dependency_array, 0, sizeof(nt_dep_ref_node_t*) * NT_DEPENDENCY_ARRAY_SIZE );
+		ctx->num_active_packets = 0;
 	} else {
 		nt_error( "dependency array not NULL on file open" );
 	}
 }
 
-nt_header_t* nt_read_trheader() {
+nt_header_t* nt_read_trheader( nt_context_t* ctx ) {
 
 	#pragma pack(push,1)
 	struct nt_header_pack {
@@ -109,8 +94,8 @@ nt_header_t* nt_read_trheader() {
 
 	// Read Header
 	struct nt_header_pack* in_header = nt_checked_malloc( sizeof(struct nt_header_pack) );
-	fseek( nt_input_tracefile, 0, SEEK_SET );
-	if( (err = fread( in_header, sizeof(struct nt_header_pack), 1, nt_input_tracefile )) < 0 ) {
+	fseek( ctx->input_tracefile, 0, SEEK_SET );
+	if( (err = fread( in_header, sizeof(struct nt_header_pack), 1, ctx->input_tracefile )) < 0 ) {
 		sprintf( strerr, "failed to read trace file header: err = %d", err );
 		nt_error( strerr );
 	}
@@ -143,7 +128,7 @@ nt_header_t* nt_read_trheader() {
 	// Read Rest of Header
 	if( to_return->notes_length > 0 && to_return->notes_length < 8192 ) {
 		to_return->notes = (char*) nt_checked_malloc( to_return->notes_length * sizeof(char) );
-		if( (err = fread( to_return->notes, sizeof(char), to_return->notes_length, nt_input_tracefile )) < 0 ) {
+		if( (err = fread( to_return->notes, sizeof(char), to_return->notes_length, ctx->input_tracefile )) < 0 ) {
 			sprintf( strerr, "failed to read trace file header notes: err = %d\n", err );
 			nt_error( strerr );
 		}
@@ -153,7 +138,7 @@ nt_header_t* nt_read_trheader() {
 	if( to_return->num_regions > 0 ) {
 		if( to_return->num_regions <= 100 ) {
 			to_return->regions = (nt_regionhead_t*) nt_checked_malloc( to_return->num_regions * sizeof(nt_regionhead_t) );
-			if( (err = fread( to_return->regions, sizeof(nt_regionhead_t), to_return->num_regions, nt_input_tracefile )) < 0 ) {
+			if( (err = fread( to_return->regions, sizeof(nt_regionhead_t), to_return->num_regions, ctx->input_tracefile )) < 0 ) {
 				sprintf( strerr, "failed to read trace file header regions: error = %d\n", err );
 				nt_error( strerr );
 			}
@@ -166,42 +151,42 @@ nt_header_t* nt_read_trheader() {
 	return to_return;
 }
 
-void nt_disable_dependencies() {
-	if( nt_track_cleared_packets_list ) {
+void nt_disable_dependencies( nt_context_t* ctx ) {
+	if( ctx->track_cleared_packets_list ) {
 		nt_error( "Cannot turn off dependencies when tracking cleared packets list" );
 	}
-	nt_dependencies_off = 1;
+	ctx->dependencies_off = 1;
 }
 
-void nt_seek_region( nt_regionhead_t* region ) {
+void nt_seek_region( nt_context_t* ctx, nt_regionhead_t* region ) {
 	int err = 0;
 	char strerr[180];
-	if( nt_input_tracefile != NULL ) {
+	if( ctx->input_tracefile != NULL ) {
 		if( region != NULL ) {
 			// Clear all existing dependencies
-			nt_delete_all_dependencies();
+			nt_delete_all_dependencies( ctx );
 			// Reopen file to fast-forward to region
 			// fseek doesn't work on compressed file
-			pclose( nt_input_tracefile );
-			nt_input_tracefile = popen( nt_input_popencmd, "r" );
-            unsigned long long int seek_offset = nt_get_headersize() + region->seek_offset;
-            unsigned long long int read_length = 4096;
+			pclose( ctx->input_tracefile );
+			ctx->input_tracefile = popen( ctx->input_popencmd, "r" );
+			unsigned long long int seek_offset = nt_get_headersize( ctx ) + region->seek_offset;
+			unsigned long long int read_length = 4096;
 			char* buffer = (char*) nt_checked_malloc( read_length );
 			while( seek_offset > read_length ) {
-				if( (err = fread( buffer, 1, read_length, nt_input_tracefile )) < 0 ) {
+				if( (err = fread( buffer, 1, read_length, ctx->input_tracefile )) < 0 ) {
 					sprintf( strerr, "failed to seek region: error = %d\n", err );
 					nt_error( strerr );
 				}
 				seek_offset -= read_length;
 			}
-			if( (err = fread( buffer, 1, seek_offset, nt_input_tracefile )) < 0 ) {
+			if( (err = fread( buffer, 1, seek_offset, ctx->input_tracefile )) < 0 ) {
 				sprintf( strerr, "failed to seek region: error = %d\n", err );
 				nt_error( strerr );
 			}
 			free( buffer );
-			if( nt_self_throttling ) {
+			if( ctx->self_throttling ) {
 				// Prime the pump to read in self throttled packets
-				nt_prime_self_throttle();
+				nt_prime_self_throttle( ctx );
 			}
 		} else {
 			nt_error( "invalid region passed: NULL" );
@@ -211,7 +196,7 @@ void nt_seek_region( nt_regionhead_t* region ) {
 	}
 }
 
-nt_packet_t* nt_read_packet( void ) {
+nt_packet_t* nt_read_packet( nt_context_t* ctx ) {
 
 	#pragma pack(push,1)
 	struct nt_packet_pack {
@@ -230,9 +215,9 @@ nt_packet_t* nt_read_packet( void ) {
 	unsigned int i;
 	char strerr[180];
 	nt_packet_t* to_return = NULL;
-	if( nt_input_tracefile != NULL ) {
+	if( ctx->input_tracefile != NULL ) {
 		to_return = nt_packet_malloc();
-		if( (err = fread( to_return, 1, sizeof(struct nt_packet_pack), nt_input_tracefile )) < 0 ) {
+		if( (err = fread( to_return, 1, sizeof(struct nt_packet_pack), ctx->input_tracefile )) < 0 ) {
 			sprintf( strerr, "failed to read packet: err = %d", err );
 			nt_error( strerr );
 		}
@@ -245,31 +230,31 @@ nt_packet_t* nt_read_packet( void ) {
 			to_return = NULL;
 			return to_return;
 		}
-		if( !nt_dependencies_off ) {
+		if( !ctx->dependencies_off ) {
 			// Track dependencies: add to_return to dependencies array
-			nt_dep_ref_node_t* node_ptr = nt_get_dependency_node( to_return->id );
+			nt_dep_ref_node_t* node_ptr = nt_get_dependency_node( ctx, to_return->id );
 			if( node_ptr == NULL ) {
-				node_ptr = nt_add_dependency_node( to_return->id );
+				node_ptr = nt_add_dependency_node( ctx, to_return->id );
 			}
 			node_ptr->node_packet = to_return;
 		}
-		nt_num_active_packets++;
-		nt_latest_active_packet_cycle = to_return->cycle;
+		ctx->num_active_packets++;
+		ctx->latest_active_packet_cycle = to_return->cycle;
 		if( to_return->num_deps == 0 ) {
 			to_return->deps = NULL;
 		} else {
 			to_return->deps = nt_dependency_malloc( to_return->num_deps );
-			if( (err = fread( to_return->deps, sizeof(nt_dependency_t), to_return->num_deps, nt_input_tracefile )) < 0 ) {
+			if( (err = fread( to_return->deps, sizeof(nt_dependency_t), to_return->num_deps, ctx->input_tracefile )) < 0 ) {
 				sprintf( strerr, "failed to read dependencies: err = %d", err );
 				nt_error( strerr );
 			}
-			if( !nt_dependencies_off ) {
+			if( !ctx->dependencies_off ) {
 				// Track dependencies: add to_return downward dependencies to array
 				for( i = 0; i < to_return->num_deps; i++ ) {
 					unsigned int dep_id = to_return->deps[i];
-					nt_dep_ref_node_t* node_ptr = nt_get_dependency_node( dep_id );
+					nt_dep_ref_node_t* node_ptr = nt_get_dependency_node( ctx, dep_id );
 					if( node_ptr == NULL ) {
-						node_ptr = nt_add_dependency_node( dep_id );
+						node_ptr = nt_add_dependency_node( ctx, dep_id );
 					}
 					node_ptr->ref_count++;
 				}
@@ -281,13 +266,13 @@ nt_packet_t* nt_read_packet( void ) {
 	return to_return;
 }
 
-nt_dep_ref_node_t* nt_add_dependency_node( unsigned int packet_id ) {
-	if( nt_dependency_array != NULL ) {
+nt_dep_ref_node_t* nt_add_dependency_node( nt_context_t* ctx, unsigned int packet_id ) {
+	if( ctx->dependency_array != NULL ) {
 		unsigned int index = packet_id % NT_DEPENDENCY_ARRAY_SIZE;
-		nt_dep_ref_node_t* dep_ptr = nt_dependency_array[index];
+		nt_dep_ref_node_t* dep_ptr = ctx->dependency_array[index];
 		if( dep_ptr == NULL ) {
-			nt_dependency_array[index] = nt_checked_malloc( sizeof(nt_dep_ref_node_t) );
-			dep_ptr = nt_dependency_array[index];
+			ctx->dependency_array[index] = nt_checked_malloc( sizeof(nt_dep_ref_node_t) );
+			dep_ptr = ctx->dependency_array[index];
 		} else {
 			for( ; dep_ptr->next_node != NULL; dep_ptr = dep_ptr->next_node );
 			dep_ptr->next_node = nt_checked_malloc( sizeof(nt_dep_ref_node_t) );
@@ -304,23 +289,23 @@ nt_dep_ref_node_t* nt_add_dependency_node( unsigned int packet_id ) {
 	return NULL;
 }
 
-void nt_read_ahead( unsigned long long int current_cycle ) {
+void nt_read_ahead( nt_context_t* ctx, unsigned long long int current_cycle ) {
 	unsigned long long int read_to_cycle = current_cycle + NT_READ_AHEAD;
 	if( read_to_cycle < current_cycle ) {
 		nt_error( "trying to read too far ahead... overflowed :(" );
 	}
-	if( read_to_cycle > nt_latest_active_packet_cycle ) {
+	if( read_to_cycle > ctx->latest_active_packet_cycle ) {
 		nt_packet_t* packet;
-		while( nt_latest_active_packet_cycle <= read_to_cycle && !nt_done_reading ) {
-			packet = nt_read_packet();
+		while( ctx->latest_active_packet_cycle <= read_to_cycle && !ctx->done_reading ) {
+			packet = nt_read_packet( ctx );
 			if( packet == NULL ) {
 				// This is the exit condition... how do we signal it to the
 				// network simulator? We shouldn't need to... It is tracking
 				// whether there are packets in flight.
 				// Just in case, we'll provide this global indicator
-				nt_done_reading = 1;
-			} else if( nt_dependencies_cleared( packet ) ) {
-				nt_add_cleared_packet_to_list( packet );
+				ctx->done_reading = 1;
+			} else if( nt_dependencies_cleared( ctx, packet ) ) {
+				nt_add_cleared_packet_to_list( ctx, packet );
 			//} else {
 				// Ignore this packet, since the reader is already tracking it
 			}
@@ -328,10 +313,10 @@ void nt_read_ahead( unsigned long long int current_cycle ) {
 	}
 }
 
-nt_packet_t* nt_remove_dependency_node( unsigned int packet_id ) {
-	if( nt_dependency_array != NULL ) {
+nt_packet_t* nt_remove_dependency_node( nt_context_t* ctx, unsigned int packet_id ) {
+	if( ctx->dependency_array != NULL ) {
 		unsigned int index = packet_id % NT_DEPENDENCY_ARRAY_SIZE;
-		nt_dep_ref_node_t* dep_ptr = nt_dependency_array[index];
+		nt_dep_ref_node_t* dep_ptr = ctx->dependency_array[index];
 		if( dep_ptr == NULL ) {
 			return NULL;
 		} else {
@@ -343,7 +328,7 @@ nt_packet_t* nt_remove_dependency_node( unsigned int packet_id ) {
 				return NULL;
 			}
 			if( prev_ptr == NULL ) {
-				nt_dependency_array[index] = dep_ptr->next_node;
+				ctx->dependency_array[index] = dep_ptr->next_node;
 			} else {
 				prev_ptr->next_node = dep_ptr->next_node;
 			}
@@ -357,11 +342,11 @@ nt_packet_t* nt_remove_dependency_node( unsigned int packet_id ) {
 	return NULL;
 }
 
-nt_dep_ref_node_t* nt_get_dependency_node( unsigned int packet_id ) {
-	if( nt_dependency_array != NULL ) {
+nt_dep_ref_node_t* nt_get_dependency_node( nt_context_t* ctx, unsigned int packet_id ) {
+	if( ctx->dependency_array != NULL ) {
 		unsigned int index = packet_id % NT_DEPENDENCY_ARRAY_SIZE;
 		nt_dep_ref_node_t* dep_ptr;
-		for( dep_ptr = nt_dependency_array[index]; dep_ptr != NULL; dep_ptr = dep_ptr->next_node ) {
+		for( dep_ptr = ctx->dependency_array[index]; dep_ptr != NULL; dep_ptr = dep_ptr->next_node ) {
 			if( dep_ptr->packet_id == packet_id ) break;
 		}
 		return dep_ptr;
@@ -371,10 +356,10 @@ nt_dep_ref_node_t* nt_get_dependency_node( unsigned int packet_id ) {
 	return NULL;
 }
 
-int nt_dependencies_cleared( nt_packet_t* packet ) {
-	if( nt_input_tracefile != NULL ) {
-		nt_dep_ref_node_t* node_ptr = nt_get_dependency_node( packet->id );
-		if( node_ptr == NULL || nt_dependencies_off ) {
+int nt_dependencies_cleared( nt_context_t* ctx, nt_packet_t* packet ) {
+	if( ctx->input_tracefile != NULL ) {
+		nt_dep_ref_node_t* node_ptr = nt_get_dependency_node( ctx, packet->id );
+		if( node_ptr == NULL || ctx->dependencies_off ) {
 			return 1;
 		} else {
 			return (node_ptr->ref_count == 0);
@@ -385,20 +370,20 @@ int nt_dependencies_cleared( nt_packet_t* packet ) {
 	return 1;
 }
 
-void nt_clear_dependencies_free_packet( nt_packet_t* packet ) {
+void nt_clear_dependencies_free_packet( nt_context_t* ctx, nt_packet_t* packet ) {
 	unsigned int i;
-	if( nt_input_tracefile != NULL ) {
+	if( ctx->input_tracefile != NULL ) {
 		if( packet != NULL ) {
 			// If self-throttling, read ahead in the trace file
 			// to ensure that there are new packets ready to go
-			if( nt_self_throttling ) {
-				nt_read_ahead( packet->cycle );
+			if( ctx->self_throttling ) {
+				nt_read_ahead( ctx, packet->cycle );
 			}
 			for( i = 0; i < packet->num_deps; i++ ) {
 				unsigned int dep_id = packet->deps[i];
-				nt_dep_ref_node_t* node_ptr = nt_get_dependency_node( dep_id );
+				nt_dep_ref_node_t* node_ptr = nt_get_dependency_node( ctx, dep_id );
 				if( node_ptr == NULL ) {
-					if( !nt_dependencies_off ) {
+					if( !ctx->dependencies_off ) {
 						// TODO: check if this is a problem with short seeks
 						nt_print_packet( packet );
 						nt_error( "failed to find dependency node" );
@@ -408,107 +393,107 @@ void nt_clear_dependencies_free_packet( nt_packet_t* packet ) {
 						nt_error( "invalid reference count on node while decrementing" );
 					}
 					node_ptr->ref_count--;
-					if( nt_track_cleared_packets_list ) {
+					if( ctx->track_cleared_packets_list ) {
 						if( node_ptr->ref_count == 0 ) {
 							// This test alleviates the possibility of a packet
 							// having ref_count zero before it has been read
 							// from the trace (node_packet = NULL)
 							if( node_ptr->node_packet ) {
-								nt_add_cleared_packet_to_list( node_ptr->node_packet );
+								nt_add_cleared_packet_to_list( ctx, node_ptr->node_packet );
 							}
 						}
 					}
 				}
 			}
-			nt_remove_dependency_node( packet->id );
+			nt_remove_dependency_node( ctx, packet->id );
 			nt_packet_free( packet );
-			nt_num_active_packets--;
+			ctx->num_active_packets--;
 		}
 	} else {
 		nt_error( "must open trace file with nt_open_trfile before ejecting" );
 	}
 }
 
-void nt_init_cleared_packets_list() {
-	if( nt_dependencies_off ) {
+void nt_init_cleared_packets_list( nt_context_t* ctx ) {
+	if( ctx->dependencies_off ) {
 		nt_error( "Cannot return cleared packets list when dependencies are turned off" );
 	}
-	nt_track_cleared_packets_list = 1;
-	nt_cleared_packets_list = NULL;
-	nt_cleared_packets_list_tail = NULL;
+	ctx->track_cleared_packets_list = 1;
+	ctx->cleared_packets_list = NULL;
+	ctx->cleared_packets_list_tail = NULL;
 }
 
-void nt_init_self_throttling() {
-	if( nt_dependencies_off ) {
+void nt_init_self_throttling( nt_context_t* ctx ) {
+	if( ctx->dependencies_off ) {
 		nt_error( "Cannot self throttle packets when dependencies are turned off" );
 	}
-	nt_self_throttling = 1;
-	nt_primed_self_throttle = 0;
-	nt_init_cleared_packets_list();
+	ctx->self_throttling = 1;
+	ctx->primed_self_throttle = 0;
+	nt_init_cleared_packets_list( ctx );
 }
 
-nt_packet_list_t* nt_get_cleared_packets_list() {
-	if( !nt_primed_self_throttle ) {
-		nt_prime_self_throttle();
+nt_packet_list_t* nt_get_cleared_packets_list( nt_context_t* ctx ) {
+	if( !ctx->primed_self_throttle ) {
+		nt_prime_self_throttle( ctx );
 	}
-	return nt_cleared_packets_list;
+	return ctx->cleared_packets_list;
 }
 
-void nt_prime_self_throttle() {
-	nt_packet_t* packet = nt_read_packet();
-	if( nt_dependencies_cleared( packet ) ) {
-		nt_add_cleared_packet_to_list( packet );
+void nt_prime_self_throttle( nt_context_t* ctx ) {
+	nt_packet_t* packet = nt_read_packet( ctx );
+	if( nt_dependencies_cleared( ctx, packet ) ) {
+		nt_add_cleared_packet_to_list( ctx, packet );
 	}
-	nt_primed_self_throttle = 1;
-	nt_read_ahead( packet->cycle );
+	ctx->primed_self_throttle = 1;
+	nt_read_ahead( ctx, packet->cycle );
 }
 
-void nt_add_cleared_packet_to_list( nt_packet_t* packet ) {
+void nt_add_cleared_packet_to_list( nt_context_t* ctx, nt_packet_t* packet ) {
 	nt_packet_list_t* new_node = nt_checked_malloc( sizeof(nt_packet_list_t) );
 	new_node->node_packet = packet;
 	new_node->next = NULL;
-	if( nt_cleared_packets_list == NULL ) {
-		nt_cleared_packets_list = nt_cleared_packets_list_tail = new_node;
+	if( ctx->cleared_packets_list == NULL ) {
+		ctx->cleared_packets_list = ctx->cleared_packets_list_tail = new_node;
 	} else {
-		nt_cleared_packets_list_tail->next = new_node;
-		nt_cleared_packets_list_tail = new_node;
+		ctx->cleared_packets_list_tail->next = new_node;
+		ctx->cleared_packets_list_tail = new_node;
 	}
 }
 
-void nt_empty_cleared_packets_list() {
-	while( nt_cleared_packets_list != NULL ) {
-		nt_packet_list_t* temp = nt_cleared_packets_list;
-		nt_cleared_packets_list = nt_cleared_packets_list->next;
+void nt_empty_cleared_packets_list( nt_context_t* ctx ) {
+	while( ctx->cleared_packets_list != NULL ) {
+		nt_packet_list_t* temp = ctx->cleared_packets_list;
+		ctx->cleared_packets_list = ctx->cleared_packets_list->next;
 		free( temp );
 	}
-	nt_cleared_packets_list = nt_cleared_packets_list_tail = NULL;
+	ctx->cleared_packets_list = ctx->cleared_packets_list_tail = NULL;
 }
 
-void nt_close_trfile() {
-	if( nt_input_tracefile != NULL ) {
-		pclose( nt_input_tracefile );
-		nt_input_tracefile = NULL;
-		nt_free_trheader( nt_input_trheader );
-		if( nt_input_popencmd != NULL ) {
-			free( nt_input_popencmd );
+void nt_close_trfile( nt_context_t* ctx ) {
+	if( ctx->input_tracefile != NULL ) {
+		pclose( ctx->input_tracefile );
+		ctx->input_tracefile = NULL;
+		nt_free_trheader( ctx->input_trheader );
+		if( ctx->input_popencmd != NULL ) {
+			free( ctx->input_popencmd );
 		}
-		nt_input_popencmd = NULL;
-		nt_delete_all_dependencies();
-		free(nt_dependency_array);
-		nt_dependency_array = NULL;
+		ctx->input_popencmd = NULL;
+		nt_delete_all_dependencies( ctx );
+		free(ctx->dependency_array);
+		ctx->dependency_array = NULL;
 	}
 }
 
-void nt_delete_all_dependencies() {
+void nt_delete_all_dependencies( nt_context_t* ctx ) {
 	int i;
 	for( i = 0; i < NT_DEPENDENCY_ARRAY_SIZE; i++ ) {
-		while( nt_dependency_array[i] != NULL ) {
-			nt_remove_dependency_node( nt_dependency_array[i]->packet_id );
+		while( ctx->dependency_array[i] != NULL ) {
+			nt_remove_dependency_node( ctx, ctx->dependency_array[i]->packet_id );
 		}
 	}
 }
 
-void nt_print_header( nt_header_t* header ) {
+void nt_print_header( nt_context_t* ctx, nt_header_t* header ) {
 	unsigned int i;
 	if( header != NULL ) {
 		printf( "NT_TRACEFILE---------------------\n" );
@@ -533,29 +518,29 @@ void nt_print_header( nt_header_t* header ) {
 			printf( "      Average injection rate: %f\n", (double)header->regions[i].num_packets / (double)header->regions[i].num_cycles );
 			printf( "      Average injection rate per node: %f\n", (double)header->regions[i].num_packets / (double)header->regions[i].num_cycles / (double)header->num_nodes );
 		}
-		printf( "  Size of header (B): %u\n", nt_get_headersize() );
+		printf( "  Size of header (B): %u\n", nt_get_headersize( ctx ) );
 		printf( "NT_TRACEFILE---------------------\n" );
 	} else {
 		printf( "NULL header passed to nt_print_header\n" );
 	}
 }
 
-void nt_print_trheader() {
-	nt_print_header( nt_input_trheader );
+void nt_print_trheader( nt_context_t* ctx ) {
+	nt_print_header( ctx, ctx->input_trheader );
 }
 
-nt_header_t* nt_get_trheader() {
-	if( nt_input_tracefile != NULL ) {
-		return nt_input_trheader;
+nt_header_t* nt_get_trheader( nt_context_t* ctx ) {
+	if( ctx->input_tracefile != NULL ) {
+		return ctx->input_trheader;
 	} else {
 		nt_error( "must open trace file with nt_open_trfile before header is available" );
 	}
 	return NULL;
 }
 
-float nt_get_trversion() {
-	if( nt_input_tracefile != NULL ) {
-		return nt_input_trheader->version;
+float nt_get_trversion( nt_context_t* ctx ) {
+	if( ctx->input_tracefile != NULL ) {
+		return ctx->input_trheader->version;
 	} else {
 		nt_error( "must open trace file with nt_open_trfile before version is available" );
 	}
@@ -656,7 +641,7 @@ void nt_free_trheader( nt_header_t* header ) {
 	}
 }
 
-int nt_get_headersize() {
+int nt_get_headersize( nt_context_t* ctx ) {
 
 	#pragma pack(push,1)
 	struct nt_header_pack {
@@ -672,11 +657,11 @@ int nt_get_headersize() {
 	};
 	#pragma pack(pop)
 
-	if( nt_input_tracefile != NULL ) {
+	if( ctx->input_tracefile != NULL ) {
 		int to_return = 0;
 		to_return += sizeof(struct nt_header_pack);
-		to_return += nt_input_trheader->notes_length;
-		to_return += nt_input_trheader->num_regions * sizeof(nt_regionhead_t);
+		to_return += ctx->input_trheader->notes_length;
+		to_return += ctx->input_trheader->num_regions * sizeof(nt_regionhead_t);
 		return to_return;
 	} else {
 		nt_error( "must open trace file with nt_open_trfile before header is available" );

@@ -37,6 +37,7 @@
 unsigned long long int calc_packet_timing( nt_packet_t* );
 
 nt_header_t* header;
+nt_context_t* ctx;
 int x_nodes, y_nodes;
 unsigned long long int cycle;
 
@@ -84,13 +85,14 @@ int main( int argc, char** argv ) {
 	queue_t** waiting;
 	queue_t** inject;
 	queue_t** traverse;
-	nt_open_trfile( tracefile );
+	ctx = calloc( 1, sizeof(nt_context_t) );
+	nt_open_trfile( ctx, tracefile );
 	if( ignore_dependencies ) {
-		nt_disable_dependencies();
+		nt_disable_dependencies( ctx );
 	}
-	nt_print_trheader();
-	header = nt_get_trheader();
-	nt_seek_region( &header->regions[start_region] );
+	nt_print_trheader( ctx );
+	header = nt_get_trheader( ctx );
+	nt_seek_region( ctx, &header->regions[start_region] );
 	for( i = 0; i < start_region; i++ ) {
 		cycle += header->regions[i].num_cycles;
 	}
@@ -111,9 +113,9 @@ int main( int argc, char** argv ) {
 	}
 
 	if( !reader_throttling ) {
-		trace_packet = nt_read_packet();
+		trace_packet = nt_read_packet( ctx );
 	} else if( !ignore_dependencies ) {
-		nt_init_self_throttling();
+		nt_init_self_throttling( ctx );
 	}
 
 	while( ( cycle <= header->num_cycles ) || packets_left ) {
@@ -124,7 +126,7 @@ int main( int argc, char** argv ) {
 		// Get packets for this cycle
 		if( reader_throttling ) {
 			nt_packet_list_t* list;
-			for( list = nt_get_cleared_packets_list(); list != NULL; list = list->next ) {
+			for( list = nt_get_cleared_packets_list( ctx ); list != NULL; list = list->next ) {
 				if( list->node_packet != NULL ) {
 					trace_packet = list->node_packet;
 					queue_node_t* new_node = (queue_node_t*) nt_checked_malloc( sizeof(queue_node_t) );
@@ -136,14 +138,14 @@ int main( int argc, char** argv ) {
 					exit(-1);
 				}
 			}
-			nt_empty_cleared_packets_list();
+			nt_empty_cleared_packets_list( ctx );
 		} else {
 			while( (trace_packet != NULL) && (trace_packet->cycle == cycle) ) {
 				// Place in appropriate queue
 				queue_node_t* new_node = (queue_node_t*) nt_checked_malloc( sizeof(queue_node_t) );
 				new_node->packet = trace_packet;
 				new_node->cycle = (trace_packet->cycle > cycle) ? trace_packet->cycle : cycle;
-				if( ignore_dependencies || nt_dependencies_cleared( trace_packet ) ) {
+				if( ignore_dependencies || nt_dependencies_cleared( ctx, trace_packet ) ) {
 					// Add to inject queue
 					queue_push( inject[trace_packet->src], new_node, new_node->cycle );
 				} else {
@@ -151,7 +153,7 @@ int main( int argc, char** argv ) {
 					queue_push( waiting[trace_packet->src], new_node, new_node->cycle );
 				}
 				// Get another packet from trace
-				trace_packet = nt_read_packet();
+				trace_packet = nt_read_packet( ctx );
 			}
 			if( (trace_packet != NULL) && (trace_packet->cycle < cycle) ) {
 				// Error check: Crash and burn
@@ -185,7 +187,7 @@ int main( int argc, char** argv ) {
 				if( (packet != NULL) && (temp_node->cycle <= cycle) ) {
 					printf( "Eject: %llu ", cycle );
 					nt_print_packet( packet );
-					nt_clear_dependencies_free_packet( packet );
+					nt_clear_dependencies_free_packet( ctx, packet );
 					temp_node = queue_pop_front( traverse[i] );
 					free( temp_node );
 				}
@@ -201,7 +203,7 @@ int main( int argc, char** argv ) {
 					queue_node_t* temp_node = (queue_node_t*) temp->elem;
 					packet = temp_node->packet;
 					temp = temp->next;
-					if( nt_dependencies_cleared( packet ) ) {
+					if( nt_dependencies_cleared( ctx, packet ) ) {
 						// remove from waiting
 						queue_remove( waiting[i], temp_node );
 						// add to inject
@@ -225,7 +227,8 @@ int main( int argc, char** argv ) {
 	free( waiting );
 	free( inject );
 	free( traverse );
-	nt_close_trfile();
+	nt_close_trfile( ctx );
+	free( ctx );
 
 	return 0;
 

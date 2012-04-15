@@ -47,6 +47,8 @@ long long int address_to_trace = -1;
 unsigned long long int min_cycle_to_trace = 0;
 unsigned long long int max_cycle_to_trace = -1;
 
+nt_context_t* ctx;
+
 int main( int argc, char** argv ) {
 	int i;
 	unsigned long long int num_dependencies = 0;
@@ -115,13 +117,14 @@ int main( int argc, char** argv ) {
 			}
 		}
 	}
-	nt_open_trfile( argv[1] );
-	nt_print_trheader();
+	ctx = calloc( 1, sizeof(nt_context_t) );
+	nt_open_trfile( ctx, argv[1] );
+	nt_print_trheader( ctx );
 	// @todo on verify flag, check region info by reading all packets
 	if( read_flag ) {
-		nt_packet_t* packet = nt_read_packet();
+		nt_packet_t* packet = nt_read_packet( ctx );
 		verify_id = packet->id;
-		for( /*packet = nt_read_packet()*/; packet != NULL; packet = nt_read_packet() ) {
+		for( /*packet = nt_read_packet()*/; packet != NULL; packet = nt_read_packet( ctx ) ) {
 			if( print_flag ) {
 				if( print_packet( packet ) ) {
 					nt_print_packet( packet );
@@ -143,10 +146,11 @@ int main( int argc, char** argv ) {
 					dep_distance += (packet->deps[i] - packet->id);
 				}
 			}
-			nt_clear_dependencies_free_packet( packet );
+			nt_clear_dependencies_free_packet( ctx, packet );
 		}
 	}
-	nt_close_trfile();
+	nt_close_trfile( ctx );
+	free( ctx );
 	if( deps_flag ) {
 		float avg_dep_distance = (float)dep_distance / (float)num_dependencies;
 		printf( "Number of Dependencies: %llu\n", num_dependencies );
