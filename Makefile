@@ -1,5 +1,6 @@
 CC			= gcc
 CFLAGS		= -Wall -O3 -c -g
+LDFLAGS         += -lm
 ifdef ver
 	ifeq "$(ver)" "debug"
 		CFLAGS += -DDEBUG_ON
